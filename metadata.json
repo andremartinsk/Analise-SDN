@@ -1,5 +1,5 @@
 {
   "name": "Analisador SDN",
-  "description": "Importe uma planilha .xlsx para analisar ",
+  "description": "Importe uma planilha .xlsx para analisar as atuações de equipamentos e visualizar as tendências em um gráfico.",
   "requestFramePermissions": []
 }

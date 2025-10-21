@@ -1,9 +1,11 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 
-// Make SheetJS and Chart.js libraries available, as they're loaded from script tags
+// Make external libraries available, as they're loaded from script tags
 declare const XLSX: any;
 declare const Chart: any;
+declare const jspdf: any;
+declare const html2canvas: any;
 
 interface IAnalysisResult {
   eqp: string;
@@ -12,13 +14,14 @@ interface IAnalysisResult {
 
 interface IChartData {
     labels: string[];
-    datasets: any[];
+    datasets: {label: string; data: number[]}[];
 }
 
-const App: React.FC = () => {
+const App = () => {
   const [analysisResult, setAnalysisResult] = useState<IAnalysisResult[]>([]);
   const [chartData, setChartData] = useState<IChartData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
 
@@ -86,10 +89,8 @@ const App: React.FC = () => {
                     let hour: number | null = null;
                     
                     if (typeof timeValue === 'number' && timeValue >= 0 && timeValue < 1) {
-                        // Handle Excel serial time format (fraction of a day)
                         hour = Math.floor(timeValue * 24);
                     } else if (typeof timeValue === 'string') {
-                        // Handle time string format like 'HH:MM:SS'
                         const hourPart = parseInt(timeValue.split(':')[0], 10);
                         if (!isNaN(hourPart) && hourPart >= 0 && hourPart < 24) {
                             hour = hourPart;
@@ -103,13 +104,11 @@ const App: React.FC = () => {
                     }
                 }
             }
-
+            
             const chartLabels = Array.from({ length: 24 }, (_, i) => `${i}h`);
             const chartDatasets = top3Eqps.map((eqp, index) => ({
                 label: eqp,
                 data: hourlyCounts[eqp],
-                borderColor: ['#007bff', '#dc3545', '#28a745'][index % 3],
-                backgroundColor: ['rgba(0, 123, 255, 0.1)', 'rgba(220, 53, 69, 0.1)', 'rgba(40, 167, 69, 0.1)'][index % 3],
                 fill: true,
                 tension: 0.2
             }));
@@ -179,10 +178,10 @@ const App: React.FC = () => {
         });
       }
     }
-     // Cleanup function to destroy chart on component unmount
     return () => {
         if (chartInstanceRef.current) {
             chartInstanceRef.current.destroy();
+            chartInstanceRef.current = null;
         }
     }
   }, [chartData]);
@@ -200,11 +199,74 @@ const App: React.FC = () => {
     event.target.value = '';
   };
 
+  const handleExportPDF = async () => {
+    const tableContainer = document.getElementById('results-container');
+    const chartContainer = document.getElementById('chart-container');
+
+    if (!tableContainer) {
+        setError("Não foi possível encontrar a tabela para exportar.");
+        return;
+    }
+
+    setIsExporting(true);
+    try {
+        const { jsPDF } = jspdf;
+        const pdf = new jsPDF({
+            orientation: 'p',
+            unit: 'mm',
+            format: 'a4'
+        });
+
+        const pdfWidth = pdf.internal.pageSize.getWidth();
+        const pdfMargin = 10;
+        const contentWidth = pdfWidth - (pdfMargin * 2);
+
+        // --- Page 1: Table ---
+        const tableCanvas = await html2canvas(tableContainer, {
+            scale: 2,
+            useCORS: true,
+        });
+        const tableImgData = tableCanvas.toDataURL('image/png');
+        const tableImgProps = pdf.getImageProperties(tableImgData);
+        const tableRatio = contentWidth / tableImgProps.width;
+        const tableImgHeight = tableImgProps.height * tableRatio;
+        
+        pdf.addImage(tableImgData, 'PNG', pdfMargin, pdfMargin, contentWidth, tableImgHeight);
+
+        // --- Page 2: Chart (if it exists) ---
+        if (chartContainer) {
+            pdf.addPage();
+            // Wait for chart animation to complete
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            const chartCanvas = await html2canvas(chartContainer, {
+                scale: 2,
+                useCORS: true,
+            });
+            const chartImgData = chartCanvas.toDataURL('image/png');
+            const chartImgProps = pdf.getImageProperties(chartImgData);
+            const chartRatio = contentWidth / chartImgProps.width;
+            const chartImgHeight = chartImgProps.height * chartRatio;
+
+            pdf.addImage(chartImgData, 'PNG', pdfMargin, pdfMargin, contentWidth, chartImgHeight);
+        }
+
+        pdf.save(`relatorio-atuacoes-${fileName}.pdf`);
+
+    } catch (err) {
+        console.error(err);
+        setError("Ocorreu um erro ao gerar o PDF.");
+    } finally {
+        setIsExporting(false);
+    }
+  };
+
+
   return (
     <div className="container">
       <h1 className="title">Analisador de Atuações de Equipamentos</h1>
       <p className="description">
-        Importe uma planilha (.xlsx) com as colunas "EQP", "Data" e "Hora" para analisar a quantidade de atuações dos 10 principais equipamentos.
+        Importe uma planilha (.xlsx) com as colunas "EQP", "Data" e "Hora" para analisar a quantidade de atuações.
       </p>
 
       <div className="file-uploader">
@@ -224,34 +286,45 @@ const App: React.FC = () => {
       {isLoading && <div className="status-message loading">Processando "{fileName}"...</div>}
       {error && <div className="status-message error">{error}</div>}
 
-      {analysisResult.length > 0 && (
-        <div className="results-container" role="region" aria-labelledby="results-title">
-          <h2 id="results-title" className="results-title">Top 10 Equipamentos com Mais Atuações</h2>
-          <table className="results-table">
-            <thead>
-              <tr>
-                <th scope="col">Equipamento (EQP)</th>
-                <th scope="col">Quantidade de Atuações</th>
-              </tr>
-            </thead>
-            <tbody>
-              {analysisResult.map((result) => (
-                <tr key={result.eqp}>
-                  <td>{result.eqp}</td>
-                  <td>{result.count}</td>
+      <div id="report-content">
+        {analysisResult.length > 0 && (
+          <div id="results-container" className="results-container" role="region" aria-labelledby="results-title">
+            <h2 id="results-title" className="results-title">Top 10 Equipamentos com Mais Atuações</h2>
+            <table className="results-table">
+              <thead>
+                <tr>
+                  <th scope="col">Equipamento (EQP)</th>
+                  <th scope="col">Quantidade de Atuações</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {analysisResult.map((result) => (
+                  <tr key={result.eqp}>
+                    <td>{result.eqp}</td>
+                    <td>{result.count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {chartData && (
+          <div id="chart-container" className="chart-container" role="region" aria-labelledby="chart-title">
+              <h2 id="chart-title" className="chart-title">Gráfico de Tendência por Hora (Top 3)</h2>
+              <canvas ref={chartRef}></canvas>
+          </div>
+        )}
+      </div>
+
+       {analysisResult.length > 0 && (
+        <div className="export-container">
+          <button onClick={handleExportPDF} className="export-button" disabled={isExporting}>
+            {isExporting ? 'Exportando PDF...' : 'Exportar Relatório em PDF'}
+          </button>
         </div>
       )}
 
-      {chartData && (
-        <div className="chart-container" role="region" aria-labelledby="chart-title">
-            <h2 id="chart-title" className="chart-title">Gráfico de Tendência por Hora (Top 3)</h2>
-            <canvas ref={chartRef}></canvas>
-        </div>
-      )}
     </div>
   );
 };
