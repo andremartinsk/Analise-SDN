@@ -1,0 +1,5 @@
+{
+  "name": "Analisador SDN",
+  "description": "Importe uma planilha .xlsx para analisar ",
+  "requestFramePermissions": []
+}
