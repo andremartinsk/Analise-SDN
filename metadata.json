@@ -1,5 +1,5 @@
 {
-  "name": "Analisador SDN",
-  "description": "Importe uma planilha .xlsx para analisar as atuações de equipamentos e visualizar as tendências em um gráfico.",
+  "name": "Analisador SDN com IA Preditiva",
+  "description": "Importe uma planilha .xlsx para analisar atuações, visualizar tendências e obter um diagnóstico preditivo com ações recomendadas por IA.",
   "requestFramePermissions": []
 }
