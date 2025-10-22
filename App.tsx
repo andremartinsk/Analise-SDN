@@ -1,8 +1,17 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { GoogleGenAI, Type } from '@google/genai';
 
-// Make external libraries available in the scope, as they're loaded from script tags
-declare const XLSX: any;
-declare const Chart: any;
+// Extend the Window interface to include globally loaded libraries for TypeScript
+interface CustomWindow extends Window {
+  XLSX: any;
+  Chart: any;
+  jspdf: {
+    jsPDF: new (options?: any) => any;
+  };
+  html2canvas: (element: HTMLElement, options?: any) => Promise<HTMLCanvasElement>;
+}
+
+declare let window: CustomWindow;
 
 interface IAnalysisResult {
   eqp: string;
@@ -14,22 +23,40 @@ interface IChartData {
   datasets: any[];
 }
 
+interface IAIDiagnosis {
+    equipamento: string;
+    padraoAtuacao: string;
+    interpretacaoTecnica: string;
+    acaoRecomendada: string;
+}
+
 const App: React.FC = () => {
   const [analysisResult, setAnalysisResult] = useState<IAnalysisResult[]>([]);
   const [chartData, setChartData] = useState<IChartData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isExporting, setIsExporting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  
+  // AI State
+  const [isDiagnosing, setIsDiagnosing] = useState<boolean>(false);
+  const [aiDiagnosis, setAiDiagnosis] = useState<IAIDiagnosis[] | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+
 
   const chartRef = useRef<HTMLCanvasElement | null>(null);
   const chartInstanceRef = useRef<any | null>(null);
-
+  const resultsContainerRef = useRef<HTMLDivElement | null>(null);
+  const chartContainerRef = useRef<HTMLDivElement | null>(null);
+  const diagnosisContainerRef = useRef<HTMLDivElement | null>(null);
 
   const processFile = useCallback((file: File) => {
     setIsLoading(true);
     setError(null);
+    setAiError(null);
     setAnalysisResult([]);
     setChartData(null);
+    setAiDiagnosis(null);
     setFileName(file.name);
 
     const reader = new FileReader();
@@ -37,10 +64,10 @@ const App: React.FC = () => {
     reader.onload = (e: ProgressEvent<FileReader>) => {
       try {
         const data = new Uint8Array(e.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(data, { type: 'array' });
+        const workbook = window.XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
-        const json: any[] = XLSX.utils.sheet_to_json(worksheet);
+        const json: any[] = window.XLSX.utils.sheet_to_json(worksheet);
 
         if (json.length === 0) {
           throw new Error("A planilha está vazia ou em um formato incorreto.");
@@ -82,7 +109,6 @@ const App: React.FC = () => {
             const eqp = row['EQP'];
             if (top3Eqps.includes(eqp)) {
                 const time = row['Hora'];
-                // Handle both string time and Excel's numeric time format
                 let hour: number | null = null;
                 if (typeof time === 'string') {
                     const hourPart = time.split(':')[0];
@@ -90,7 +116,7 @@ const App: React.FC = () => {
                     if (!isNaN(parsedHour)) {
                         hour = parsedHour;
                     }
-                } else if (typeof time === 'number' && time < 1) { // Excel time is a fraction of a day
+                } else if (typeof time === 'number' && time < 1) {
                     hour = Math.floor(time * 24);
                 }
 
@@ -131,7 +157,6 @@ const App: React.FC = () => {
     }
 
     reader.readAsArrayBuffer(file);
-
   }, []);
   
   useEffect(() => {
@@ -142,7 +167,7 @@ const App: React.FC = () => {
 
       const ctx = chartRef.current.getContext('2d');
       if (ctx) {
-        chartInstanceRef.current = new Chart(ctx, {
+        chartInstanceRef.current = new window.Chart(ctx, {
           type: 'line',
           data: chartData,
           options: {
@@ -165,7 +190,6 @@ const App: React.FC = () => {
         });
       }
     }
-     // Cleanup on component unmount
     return () => {
         if (chartInstanceRef.current) {
             chartInstanceRef.current.destroy();
@@ -173,6 +197,128 @@ const App: React.FC = () => {
     }
   }, [chartData]);
 
+  const handleGenerateDiagnosis = async () => {
+    if (!analysisResult.length || !chartData) {
+        setAiError("Dados insuficientes para gerar diagnóstico.");
+        return;
+    }
+
+    setIsDiagnosing(true);
+    setAiError(null);
+    setAiDiagnosis(null);
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+        
+        const top3Summary = analysisResult.slice(0, 3).map((r, i) => 
+            `- ${r.eqp}: ${r.count} atuações. Padrão horário (array 24h): ${JSON.stringify(chartData.datasets[i]?.data)}`
+        ).join('\n');
+
+        const prompt = `
+            Você é um especialista em manutenção preditiva para equipamentos pesados de movimentação de granéis, como transportadores de correia, carregadores de navio, recuperadoras e empilhadeiras-recuperadoras.
+            Analise os seguintes dados de atuação dos 3 principais equipamentos e forneça um diagnóstico técnico e acionável.
+
+            Dados de Atuação:
+            ${top3Summary}
+
+            Para cada um dos 3 equipamentos, retorne um objeto JSON com as seguintes chaves:
+            - "equipamento": Nome do equipamento.
+            - "padraoAtuacao": Descrição curta do padrão de atuações (ex: "Picos noturnos", "Operação constante", "Atividade concentrada na madrugada").
+            - "interpretacaoTecnica": Diagnóstico técnico conciso, relacionando o padrão a possíveis causas em equipamentos como estes (ex: "Desgaste de componentes mecânicos", "Falha em sensores", "Sobrecarga operacional em horários específicos").
+            - "acaoRecomendada": Sugestão de ação clara e direta para a equipe de manutenção (ex: "Inspecionar sistema de tração", "Verificar alinhamento da correia transportadora", "Analisar alarmes do período de pico").
+
+            O resultado final deve ser um array de objetos JSON.
+        `;
+        
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: prompt,
+            config: {
+                responseMimeType: 'application/json',
+                responseSchema: {
+                    type: Type.ARRAY,
+                    items: {
+                        type: Type.OBJECT,
+                        properties: {
+                            equipamento: { type: Type.STRING },
+                            padraoAtuacao: { type: Type.STRING, description: "Descrição curta do padrão (ex: picos noturnos, constante)." },
+                            interpretacaoTecnica: { type: Type.STRING, description: "Diagnóstico técnico curto (ex: desgaste esperado, falha iminente)." },
+                            acaoRecomendada: { type: Type.STRING, description: "Ação imediata sugerida (ex: inspecionar, agendar manutenção)." }
+                        },
+                        required: ["equipamento", "padraoAtuacao", "interpretacaoTecnica", "acaoRecomendada"]
+                    }
+                }
+            }
+        });
+
+        const diagnosisData = JSON.parse(response.text);
+        setAiDiagnosis(diagnosisData);
+
+    } catch (err) {
+        console.error("AI Diagnosis Error:", err);
+        setAiError("Não foi possível gerar o diagnóstico. Tente novamente.");
+    } finally {
+        setIsDiagnosing(false);
+    }
+  };
+
+
+  const handleExportPDF = async () => {
+    if (!resultsContainerRef.current || !chartContainerRef.current) {
+      setError("Elementos do relatório não encontrados para exportação.");
+      return;
+    }
+    
+    setIsExporting(true);
+    setError(null);
+    
+    try {
+        const { jsPDF } = window.jspdf;
+        const doc = new jsPDF({
+            orientation: 'p',
+            unit: 'mm',
+            format: 'a4',
+        });
+        
+        const margin = 10;
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const contentWidth = pageWidth - margin * 2;
+
+        // 1. Capture and add Table
+        const tableCanvas = await window.html2canvas(resultsContainerRef.current, { scale: 2 });
+        const tableImgData = tableCanvas.toDataURL('image/png');
+        const tableImgProps = doc.getImageProperties(tableImgData);
+        const tableImgHeight = (tableImgProps.height * contentWidth) / tableImgProps.width;
+        doc.addImage(tableImgData, 'PNG', margin, margin, contentWidth, tableImgHeight);
+
+        // 2. Add new page for the chart
+        doc.addPage();
+        
+        // 3. Capture and add Chart
+        const chartCanvas = await window.html2canvas(chartContainerRef.current, { scale: 2 });
+        const chartImgData = chartCanvas.toDataURL('image/png');
+        const chartImgProps = doc.getImageProperties(chartImgData);
+        const chartImgHeight = (chartImgProps.height * contentWidth) / chartImgProps.width;
+        doc.addImage(chartImgData, 'PNG', margin, margin, contentWidth, chartImgHeight);
+        
+        // 4. Capture and add AI Diagnosis if it exists
+        if (aiDiagnosis && diagnosisContainerRef.current) {
+            doc.addPage();
+            const diagnosisCanvas = await window.html2canvas(diagnosisContainerRef.current, { scale: 2 });
+            const diagnosisImgData = diagnosisCanvas.toDataURL('image/png');
+            const diagnosisImgProps = doc.getImageProperties(diagnosisImgData);
+            const diagnosisImgHeight = (diagnosisImgProps.height * contentWidth) / diagnosisImgProps.width;
+            doc.addImage(diagnosisImgData, 'PNG', margin, margin, contentWidth, diagnosisImgHeight);
+        }
+        
+        doc.save(`Relatorio_${fileName || 'atuacoes'}.pdf`);
+    } catch (err) {
+        setError("Ocorreu um erro ao gerar o PDF.");
+        console.error(err);
+    } finally {
+        setIsExporting(false);
+    }
+  };
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -211,7 +357,7 @@ const App: React.FC = () => {
       {error && <div className="status-message error">{error}</div>}
 
       {analysisResult.length > 0 && (
-        <div className="results-container" role="region" aria-labelledby="results-title">
+        <div ref={resultsContainerRef} className="results-container" role="region" aria-labelledby="results-title">
           <h2 id="results-title" className="results-title">Top 10 Equipamentos com Mais Atuações</h2>
           <table className="results-table">
             <thead>
@@ -233,9 +379,57 @@ const App: React.FC = () => {
       )}
 
       {chartData && (
-        <div className="chart-container">
+        <div ref={chartContainerRef} className="chart-container">
             <h2 className="chart-title">Tendência de Atuações por Hora (Top 3)</h2>
             <canvas ref={chartRef} aria-label="Gráfico de linha de atuações por hora" role="img"></canvas>
+        </div>
+      )}
+
+        {analysisResult.length > 0 && (
+            <div className="actions-container">
+                <button
+                    onClick={handleGenerateDiagnosis}
+                    className="action-button primary"
+                    disabled={isDiagnosing}
+                >
+                    {isDiagnosing ? 'Analisando...' : 'Gerar Diagnóstico Preditivo (IA)'}
+                </button>
+                <button 
+                    onClick={handleExportPDF} 
+                    className="action-button success" 
+                    disabled={isExporting}
+                >
+                    {isExporting ? 'Exportando PDF...' : 'Exportar Relatório em PDF'}
+                </button>
+            </div>
+        )}
+
+      {isDiagnosing && <div className="status-message loading">A IA está analisando os dados...</div>}
+      {aiError && <div className="status-message error">{aiError}</div>}
+
+      {aiDiagnosis && (
+        <div ref={diagnosisContainerRef} className="diagnosis-container">
+          <h2 className="results-title">Diagnóstico Preditivo por IA</h2>
+          <table className="diagnosis-table">
+            <thead>
+              <tr>
+                <th>Equipamento</th>
+                <th>Padrão de Atuação</th>
+                <th>Interpretação Técnica</th>
+                <th>Ação Recomendada</th>
+              </tr>
+            </thead>
+            <tbody>
+              {aiDiagnosis.map((diag, index) => (
+                <tr key={index}>
+                  <td>{diag.equipamento}</td>
+                  <td>{diag.padraoAtuacao}</td>
+                  <td>{diag.interpretacaoTecnica}</td>
+                  <td>{diag.acaoRecomendada}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
